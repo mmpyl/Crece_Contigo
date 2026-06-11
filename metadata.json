@@ -1,0 +1,6 @@
+{
+  "name": "Crece Contigo",
+  "description": "Plataforma integral de salud y crecimiento infantil basada en estándares CRED del MINSA y de la OMS.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
