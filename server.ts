@@ -5,7 +5,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import { DB } from "./src/server/db.ts";
 import { calculateZScores, getGrowthCurves } from "./src/server/who.ts";
 
-const app = express();
+export const app = express();
 app.use(express.json({ limit: '10mb' })); // support base64 imagery uploads
 
 const PORT = 3000;
@@ -486,6 +486,8 @@ const startServer = async () => {
   });
 };
 
-startServer().catch((err) => {
-  console.error("Fallo al inicializar el servidor full-stack de Crece Contigo:", err);
-});
+if (!process.env.NETLIFY) {
+  startServer().catch((err) => {
+    console.error("Fallo al inicializar el servidor full-stack de Crece Contigo:", err);
+  });
+}
