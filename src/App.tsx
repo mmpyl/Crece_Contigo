@@ -110,32 +110,59 @@ export default function App() {
           "X-User-Id": currentUser.id,
         },
       });
-      const childrenData = await cRes.json();
-      setChildren(childrenData);
-
-      if (childrenData.length > 0) {
-        // Auto-select first baby
-        setSelectedChildId(childrenData[0].id);
+      if (cRes.ok) {
+        const childrenData = await cRes.json();
+        if (Array.isArray(childrenData)) {
+          setChildren(childrenData);
+          if (childrenData.length > 0) {
+            // Auto-select first baby
+            setSelectedChildId(childrenData[0].id);
+          } else {
+            setSelectedChildId("");
+          }
+        } else {
+          console.error("Los datos de niños devueltos no son un arreglo:", childrenData);
+          setChildren([]);
+        }
       } else {
-        setSelectedChildId("");
+        console.error("Error al obtener niños del servidor:", cRes.status);
+        setChildren([]);
       }
 
       // 2. Fetch Active Health Alerts
       const aRes = await fetch("/api/v1/alerts");
-      const alertsData = await aRes.json();
-      setAlerts(alertsData);
+      if (aRes.ok) {
+        const alertsData = await aRes.json();
+        if (Array.isArray(alertsData)) {
+          setAlerts(alertsData);
+        } else {
+          console.error("Las alertas devueltas no son un arreglo:", alertsData);
+          setAlerts([]);
+        }
+      } else {
+        console.error("Error al obtener alertas del servidor:", aRes.status);
+        setAlerts([]);
+      }
     } catch (err) {
       console.error("Fallo al sincronizar datos del servidor:", err);
+      setChildren([]);
+      setAlerts([]);
     }
   };
 
   const fetchChildDetail = async (id: string) => {
     try {
       const res = await fetch(`/api/v1/children/${id}`);
-      const data = await res.json();
       if (res.ok) {
-        setChildDetails(data);
-        setAiAnalysis(""); // Reset AI text across child focus
+        const data = await res.json();
+        if (data && data.child && Array.isArray(data.growthLogs) && Array.isArray(data.vaccineRecords)) {
+          setChildDetails(data);
+          setAiAnalysis(""); // Reset AI text across child focus
+        } else {
+          console.error("Ficha detallada del niño tiene un formato inválido:", data);
+        }
+      } else {
+        console.error("Error al obtener detalles del niño:", res.status);
       }
     } catch (err) {
       console.error("Fallo al leer ficha detallada:", err);
@@ -404,7 +431,7 @@ export default function App() {
 
             {/* List with styled cards */}
             <div className="space-y-3 max-h-[290px] overflow-y-auto pr-1">
-              {children.map((c) => {
+              {Array.isArray(children) && children.map((c) => {
                 const isSelected = c.id === selectedChildId;
                 const healthClass = getChildSeverityClass(c.id);
 
@@ -449,7 +476,7 @@ export default function App() {
             </h3>
 
             <div className="space-y-3 overflow-y-auto flex-1 max-h-[300px]">
-              {alerts.filter(a => !a.resolved && (currentUser.role === "nurse" || a.childId === selectedChildId)).length === 0 ? (
+              {!Array.isArray(alerts) || alerts.filter(a => !a.resolved && (currentUser.role === "nurse" || a.childId === selectedChildId)).length === 0 ? (
                 <div className="text-center p-6 bg-slate-50 border border-slate-100 rounded-xl flex flex-col justify-center items-center h-full">
                   <CheckCircle className="w-8 h-8 text-emerald-500 mb-2" />
                   <p className="text-xs font-semibold text-slate-500">Ninguna condición de alarma detectada</p>
