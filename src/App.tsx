@@ -33,6 +33,7 @@ import GrowthChart from "./components/GrowthChart";
 import TriageChat from "./components/TriageChat";
 import VisionTallimetro from "./components/VisionTallimetro";
 import EscuelaPadres from "./components/EscuelaPadres";
+import { calculateZScoresClient, getGrowthCurvesClient, recomputeLocalAlerts } from "./utils/localStorageDb";
 
 export default function App() {
   // Session Roles Simulators
@@ -110,62 +111,230 @@ export default function App() {
           "X-User-Id": currentUser.id,
         },
       });
+      let serverChildren: Child[] = [];
       if (cRes.ok) {
         const childrenData = await cRes.json();
         if (Array.isArray(childrenData)) {
-          setChildren(childrenData);
-          if (childrenData.length > 0) {
-            // Auto-select first baby
-            setSelectedChildId(childrenData[0].id);
-          } else {
-            setSelectedChildId("");
-          }
-        } else {
-          console.error("Los datos de niños devueltos no son un arreglo:", childrenData);
-          setChildren([]);
+          serverChildren = childrenData;
         }
       } else {
-        console.error("Error al obtener niños del servidor:", cRes.status);
-        setChildren([]);
+        console.warn("Error al obtener niños del servidor, usando local como respaldo:", cRes.status);
+      }
+
+      // Load children from local storage
+      const localChildrenStr = localStorage.getItem("local_children");
+      let localChildren: Child[] = [];
+      if (localChildrenStr) {
+        try {
+          localChildren = JSON.parse(localChildrenStr);
+        } catch (e) {
+          console.error("Error al decodificar niños locales:", e);
+        }
+      }
+
+      // Filter local children matching the current user's role/id if user is parent
+      if (currentUser.role === "parent") {
+        localChildren = localChildren.filter(c => c.parentId === currentUser.id);
+      }
+
+      // Merge child lists by ID
+      const mergedChildrenMap = new Map<string, Child>();
+      serverChildren.forEach(c => mergedChildrenMap.set(c.id, c));
+      localChildren.forEach(c => mergedChildrenMap.set(c.id, c));
+      const mergedChildren = Array.from(mergedChildrenMap.values());
+
+      setChildren(mergedChildren);
+
+      // Auto-select first baby if nothing is selected or if selected ID is invalid
+      if (mergedChildren.length > 0) {
+        if (!selectedChildId || !mergedChildren.some(c => c.id === selectedChildId)) {
+          setSelectedChildId(mergedChildren[0].id);
+        }
+      } else {
+        setSelectedChildId("");
       }
 
       // 2. Fetch Active Health Alerts
       const aRes = await fetch("/api/v1/alerts");
+      let serverAlerts: HealthAlert[] = [];
       if (aRes.ok) {
         const alertsData = await aRes.json();
         if (Array.isArray(alertsData)) {
-          setAlerts(alertsData);
-        } else {
-          console.error("Las alertas devueltas no son un arreglo:", alertsData);
-          setAlerts([]);
+          serverAlerts = alertsData;
         }
-      } else {
-        console.error("Error al obtener alertas del servidor:", aRes.status);
-        setAlerts([]);
       }
+
+      // Load local alerts
+      const localAlertsStr = localStorage.getItem("local_alerts");
+      let localAlerts: HealthAlert[] = [];
+      if (localAlertsStr) {
+        try {
+          localAlerts = JSON.parse(localAlertsStr);
+        } catch (e) {
+          console.error("Error al decodificar alertas locales:", e);
+        }
+      }
+
+      // Merge alerts
+      const mergedAlertsMap = new Map<string, HealthAlert>();
+      serverAlerts.forEach(a => mergedAlertsMap.set(a.id, a));
+      localAlerts.forEach(a => mergedAlertsMap.set(a.id, a));
+      setAlerts(Array.from(mergedAlertsMap.values()));
+
     } catch (err) {
-      console.error("Fallo al sincronizar datos del servidor:", err);
-      setChildren([]);
-      setAlerts([]);
+      console.error("Fallo al sincronizar datos del servidor, cargando totalmente local:", err);
+      // Fail-safe offline/local load
+      const localChildrenStr = localStorage.getItem("local_children");
+      let localChildren: Child[] = [];
+      if (localChildrenStr) {
+        try { localChildren = JSON.parse(localChildrenStr); } catch {}
+      }
+      if (currentUser.role === "parent") {
+        localChildren = localChildren.filter(c => c.parentId === currentUser.id);
+      }
+      setChildren(localChildren);
+      if (localChildren.length > 0 && (!selectedChildId || !localChildren.some(c => c.id === selectedChildId))) {
+        setSelectedChildId(localChildren[0].id);
+      }
+
+      const localAlertsStr = localStorage.getItem("local_alerts");
+      let localAlerts: HealthAlert[] = [];
+      if (localAlertsStr) {
+        try { localAlerts = JSON.parse(localAlertsStr); } catch {}
+      }
+      setAlerts(localAlerts);
     }
+  };
+
+  const fallbackLocalDetail = (id: string) => {
+    const localChildrenStr = localStorage.getItem("local_children");
+    let localChildren: Child[] = [];
+    if (localChildrenStr) {
+      try { localChildren = JSON.parse(localChildrenStr); } catch {}
+    }
+    const localChild = localChildren.find(c => c.id === id);
+    if (!localChild) {
+      console.warn("Lactante no encontrado localmente tampoco:", id);
+      return;
+    }
+
+    // Load logs
+    const localLogsStr = localStorage.getItem("local_growth_logs");
+    let localLogs: GrowthLog[] = [];
+    if (localLogsStr) {
+      try { localLogs = JSON.parse(localLogsStr); } catch {}
+    }
+    const matchingLogs = localLogs.filter(l => l.childId === id)
+      .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    // Load vaccine records
+    const localVaccinesStr = localStorage.getItem("local_vaccine_records");
+    let localVaccines: VaccineRecord[] = [];
+    if (localVaccinesStr) {
+      try { localVaccines = JSON.parse(localVaccinesStr); } catch {}
+    }
+    const matchingVaccines = localVaccines.filter(vr => vr.childId === id);
+
+    // Load milestones
+    const localMilestonesStr = localStorage.getItem("local_milestones");
+    let localMilestones: Milestone[] = [];
+    if (localMilestonesStr) {
+      try { localMilestones = JSON.parse(localMilestonesStr); } catch {}
+    }
+    const matchingMilestones = localMilestones.filter(m => m.childId === id);
+
+    setChildDetails({
+      child: localChild,
+      growthLogs: matchingLogs,
+      vaccineRecords: matchingVaccines,
+      milestones: matchingMilestones,
+      growthCurves: getGrowthCurvesClient(localChild.gender)
+    });
+    setAiAnalysis("");
   };
 
   const fetchChildDetail = async (id: string) => {
     try {
       const res = await fetch(`/api/v1/children/${id}`);
+      let serverDetails: any = null;
       if (res.ok) {
-        const data = await res.json();
-        if (data && data.child && Array.isArray(data.growthLogs) && Array.isArray(data.vaccineRecords)) {
-          setChildDetails(data);
-          setAiAnalysis(""); // Reset AI text across child focus
-        } else {
-          console.error("Ficha detallada del niño tiene un formato inválido:", data);
-        }
-      } else {
-        console.error("Error al obtener detalles del niño:", res.status);
+        serverDetails = await res.json();
       }
+
+      // Load local counterparts to merge/fallback
+      const localChildrenStr = localStorage.getItem("local_children");
+      let localChildren: Child[] = [];
+      if (localChildrenStr) {
+        try { localChildren = JSON.parse(localChildrenStr); } catch {}
+      }
+      const localChild = localChildren.find(c => c.id === id);
+
+      const activeChild = serverDetails?.child || localChild;
+      if (!activeChild) {
+        console.warn("Niño no encontrado ni en servidor ni en local storage:", id);
+        return;
+      }
+
+      // Merge logs
+      let mergedGrowthLogs = serverDetails?.growthLogs || [];
+      const localLogsStr = localStorage.getItem("local_growth_logs");
+      let localLogs: GrowthLog[] = [];
+      if (localLogsStr) {
+        try { localLogs = JSON.parse(localLogsStr); } catch {}
+      }
+      const matchingLocalLogs = localLogs.filter(l => l.childId === id);
+      const logsMap = new Map<string, GrowthLog>();
+      mergedGrowthLogs.forEach((l: GrowthLog) => logsMap.set(l.id, l));
+      matchingLocalLogs.forEach((l: GrowthLog) => logsMap.set(l.id, l));
+      mergedGrowthLogs = Array.from(logsMap.values()).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+      // Merge vaccine records
+      let mergedVaccineRecords = serverDetails?.vaccineRecords || [];
+      const localVaccinesStr = localStorage.getItem("local_vaccine_records");
+      let localVaccines: VaccineRecord[] = [];
+      if (localVaccinesStr) {
+        try { localVaccines = JSON.parse(localVaccinesStr); } catch {}
+      }
+      const matchingLocalVaccines = localVaccines.filter(vr => vr.childId === id);
+      const vaccinesMap = new Map<string, any>();
+      mergedVaccineRecords.forEach((vr: any) => vaccinesMap.set(vr.id, vr));
+      matchingLocalVaccines.forEach((vr: any) => {
+        const existing = vaccinesMap.get(vr.id);
+        vaccinesMap.set(vr.id, {
+          ...existing,
+          ...vr,
+          details: vr.details || existing?.details
+        });
+      });
+      mergedVaccineRecords = Array.from(vaccinesMap.values());
+
+      // Merge milestones
+      let mergedMilestones = serverDetails?.milestones || [];
+      const localMilestonesStr = localStorage.getItem("local_milestones");
+      let localMilestones: Milestone[] = [];
+      if (localMilestonesStr) {
+        try { localMilestones = JSON.parse(localMilestonesStr); } catch {}
+      }
+      const matchingLocalMilestones = localMilestones.filter(m => m.childId === id);
+      const milestonesMap = new Map<string, Milestone>();
+      mergedMilestones.forEach((m: Milestone) => milestonesMap.set(m.id, m));
+      matchingLocalMilestones.forEach((m: Milestone) => milestonesMap.set(m.id, m));
+      mergedMilestones = Array.from(milestonesMap.values());
+
+      // Curves
+      const growthCurves = serverDetails?.growthCurves || getGrowthCurvesClient(activeChild.gender);
+
+      setChildDetails({
+        child: activeChild,
+        growthLogs: mergedGrowthLogs,
+        vaccineRecords: mergedVaccineRecords,
+        milestones: mergedMilestones,
+        growthCurves
+      });
+      setAiAnalysis("");
     } catch (err) {
-      console.error("Fallo al leer ficha detallada:", err);
+      console.error("Fallo al leer ficha detallada del servidor, usando local:", err);
+      fallbackLocalDetail(id);
     }
   };
 
@@ -192,46 +361,218 @@ export default function App() {
   // Create child
   const handleCreateChild = async (e: React.FormEvent) => {
     e.preventDefault();
+    const tempId = "child_local_" + Math.random().toString(36).substr(2, 9);
+    const babyPayload = {
+      id: tempId,
+      parentId: currentUser.role === "parent" ? currentUser.id : "parent_1",
+      name: newChildForm.name,
+      birthDate: newChildForm.birthDate,
+      gender: newChildForm.gender,
+      bloodType: newChildForm.bloodType || "O+",
+      birthWeightKg: parseFloat(newChildForm.birthWeightKg) || 3.0,
+      birthHeightCm: parseFloat(newChildForm.birthHeightCm) || 49.0,
+      gestionalAgeWeeks: parseInt(newChildForm.gestionalAgeWeeks) || 39,
+      photoUrl: newChildForm.photoUrl || "",
+    };
+
+    let babyObj = babyPayload;
+
     try {
       const res = await fetch("/api/v1/children", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...newChildForm,
-          parentId: currentUser.role === "parent" ? currentUser.id : "parent_1", // link default
-        }),
+        body: JSON.stringify(babyPayload),
       });
       if (res.ok) {
-        const baby = await res.json();
-        setShowAddChildModal(false);
-        // Refresh
-        await fetchSystemData();
-        setSelectedChildId(baby.id);
-        // Reset sheet
-        setNewChildForm({
-          name: "",
-          birthDate: "",
-          gender: "Masculino",
-          bloodType: "O+",
-          birthWeightKg: "",
-          birthHeightCm: "",
-          gestionalAgeWeeks: "39",
-          photoUrl: "",
-        });
+        const serverBaby = await res.json();
+        if (serverBaby && serverBaby.id) {
+          babyObj = serverBaby;
+        }
       } else {
-        const data = await res.json();
-        alert(`Error al registrar perfil: ${data.error}`);
+        console.warn("Fallo el registro en servidor, se guardará localmente.");
       }
     } catch (err) {
-      alert("Error de red.");
+      console.warn("Error de red al registrar en servidor, guardando localmente:", err);
     }
+
+    // Always persist to local storage so that it's permanent on Netlify!
+    const localChildrenStr = localStorage.getItem("local_children");
+    let localChildren = [];
+    if (localChildrenStr) {
+      try { localChildren = JSON.parse(localChildrenStr); } catch {}
+    }
+    localChildren.push(babyObj);
+    localStorage.setItem("local_children", JSON.stringify(localChildren));
+
+    // Also seed local growth log for the birth metrics
+    const birthZ = calculateZScoresClient(babyObj.birthDate, babyObj.gender, babyObj.birthWeightKg, babyObj.birthHeightCm);
+    const birthLog = {
+      id: "log_local_" + Math.random().toString(36).substr(2, 9),
+      childId: babyObj.id,
+      date: babyObj.birthDate,
+      weightKg: babyObj.birthWeightKg,
+      heightCm: babyObj.birthHeightCm,
+      headCircumferenceCm: 34.0,
+      weightZ: birthZ.weightZ,
+      heightZ: birthZ.heightZ,
+      weightStatus: birthZ.weightStatus,
+      heightStatus: birthZ.heightStatus,
+      registeredBy: "Sistema CRED (Local)",
+    };
+    const localLogsStr = localStorage.getItem("local_growth_logs");
+    let localLogs = [];
+    if (localLogsStr) {
+      try { localLogs = JSON.parse(localLogsStr); } catch {}
+    }
+    localLogs.push(birthLog);
+    localStorage.setItem("local_growth_logs", JSON.stringify(localLogs));
+
+    // Also seed standard vaccine records locally
+    const vaccinesList = [
+      { id: "v_bcg", name: "BCG", dose: "Dosis Única", targetAgeMonths: 0, diseaseTargeted: "Tuberculosis Meníngea" },
+      { id: "v_hvb", name: "HvB", dose: "Dosis Única", targetAgeMonths: 0, diseaseTargeted: "Hepatitis B" },
+      { id: "v_penta_1", name: "Pentavalente (1ra)", dose: "1ra Dosis", targetAgeMonths: 2, diseaseTargeted: "Difteria, Tétanos, Tos Convulsiva, Hepatitis B, Hemophilus Influenza B" },
+      { id: "v_polio_1", name: "Polio IPV (1ra)", dose: "1ra Dosis", targetAgeMonths: 2, diseaseTargeted: "Poliomielitis" },
+      { id: "v_rota_1", name: "Rotavirus (1ra)", dose: "1ra Dosis", targetAgeMonths: 2, diseaseTargeted: "Diarreas severas por Rotavirus" },
+      { id: "v_neumo_1", name: "Neumococo (1ra)", dose: "1ra Dosis", targetAgeMonths: 2, diseaseTargeted: "Neumonía, Meningitis, Otitis" },
+      { id: "v_penta_2", name: "Pentavalente (2da)", dose: "2da Dosis", targetAgeMonths: 4, diseaseTargeted: "Difteria, Tétanos, Tos Convulsiva, Hepatitis B, Hib" },
+      { id: "v_polio_2", name: "Polio IPV (2da)", dose: "2da Dosis", targetAgeMonths: 4, diseaseTargeted: "Poliomielitis" },
+      { id: "v_rota_2", name: "Rotavirus (2da)", dose: "2da Dosis", targetAgeMonths: 4, diseaseTargeted: "Diarreas por Rotavirus" },
+      { id: "v_neumo_2", name: "Neumococo (2da)", dose: "2da Dosis", targetAgeMonths: 4, diseaseTargeted: "Neumonía, Meningitis, Otitis" },
+      { id: "v_penta_3", name: "Pentavalente (3ra)", dose: "3ra Dosis", targetAgeMonths: 6, diseaseTargeted: "Difteria, Tétanos, Tos Convulsiva, Hepatitis B, Hib" },
+      { id: "v_polio_3", name: "Polio APO (3ra)", dose: "3ra Dosis", targetAgeMonths: 6, diseaseTargeted: "Poliomielitis" },
+      { id: "v_inf_1", name: "Influenza Pediátrica (1ra)", dose: "1ra Dosis", targetAgeMonths: 6, diseaseTargeted: "Influenza Estacional" },
+      { id: "v_spr_1", name: "SPR (1ra)", dose: "1ra Dosis", targetAgeMonths: 12, diseaseTargeted: "Sarampión, Papera, Rubéola" },
+      { id: "v_neumo_3", name: "Neumococo (3ra)", dose: "3ra Dosis", targetAgeMonths: 12, diseaseTargeted: "Neumonía, Meningitis, Otitis" },
+      { id: "v_var_1", name: "Varicela", dose: "Dosis Única", targetAgeMonths: 12, diseaseTargeted: "Varicela" },
+      { id: "v_ama_1", name: "Antiamarílica (AMA)", dose: "Dosis Única", targetAgeMonths: 15, diseaseTargeted: "Fiebre Amarilla" },
+      { id: "v_dpt_ref1", name: "DPT Refuerzo (1er)", dose: "1er Refuerzo", targetAgeMonths: 18, diseaseTargeted: "Difteria, Tétanos, Tos Convulsiva" },
+      { id: "v_polio_ref1", name: "Polio APO Refuerzo (1er)", dose: "1er Refuerzo", targetAgeMonths: 18, diseaseTargeted: "Poliomielitis" },
+      { id: "v_spr_2", name: "SPR (2da)", dose: "2da Dosis", targetAgeMonths: 18, diseaseTargeted: "Sarampión, Papera, Rubéola" },
+    ];
+
+    const localVaccinesStr = localStorage.getItem("local_vaccine_records");
+    let localVaccines = [];
+    if (localVaccinesStr) {
+      try { localVaccines = JSON.parse(localVaccinesStr); } catch {}
+    }
+
+    const childAgeMonths = (Date.now() - new Date(babyObj.birthDate).getTime()) / (1000 * 60 * 60 * 24 * 30.4375);
+    vaccinesList.forEach(v => {
+      let status: "applied" | "pending" | "delayed" = "pending";
+      let dateApplied: string | undefined = undefined;
+      let nurseName: string | undefined = undefined;
+
+      if (v.targetAgeMonths === 0 || childAgeMonths >= v.targetAgeMonths + 1) {
+        if (v.targetAgeMonths === 0) {
+          status = "applied";
+          dateApplied = babyObj.birthDate;
+          nurseName = "Lic. Carlos Segura";
+        } else {
+          status = "delayed";
+        }
+      }
+
+      localVaccines.push({
+        id: "vr_local_" + Math.random().toString(36).substr(2, 9),
+        childId: babyObj.id,
+        vaccineId: v.id,
+        status,
+        dateApplied,
+        nurseName,
+        details: v,
+      });
+    });
+    localStorage.setItem("local_vaccine_records", JSON.stringify(localVaccines));
+
+    // Seed local standard milestones
+    const milestoneTexts = [
+      { ageGroupMonths: 2, milestoneText: "Sonrisa social amplia", pnpCategory: "Social" },
+      { ageGroupMonths: 2, milestoneText: "Sostiene la cabeza por momentos en prono", pnpCategory: "Motor" },
+      { ageGroupMonths: 4, milestoneText: "Suma gorgojeos y balbuceos", pnpCategory: "Lenguaje" },
+      { ageGroupMonths: 4, milestoneText: "Intenta agarrar juguetes llamativos", pnpCategory: "Cognitivo" },
+      { ageGroupMonths: 6, milestoneText: "Se mantiene sentado con apoyo", pnpCategory: "Motor" },
+      { ageGroupMonths: 9, milestoneText: "Se sienta solo sin apoyo", pnpCategory: "Motor" },
+      { ageGroupMonths: 12, milestoneText: "Camina con ayuda o de la mano", pnpCategory: "Motor" },
+      { ageGroupMonths: 18, milestoneText: "Dice de 5 a 10 palabras claras", pnpCategory: "Lenguaje" },
+      { ageGroupMonths: 18, milestoneText: "Camina solo con estabilidad amplia", pnpCategory: "Motor" },
+    ];
+
+    const localMilestonesStr = localStorage.getItem("local_milestones");
+    let localMilestones = [];
+    if (localMilestonesStr) {
+      try { localMilestones = JSON.parse(localMilestonesStr); } catch {}
+    }
+    milestoneTexts.forEach(m => {
+      localMilestones.push({
+        id: "m_local_" + Math.random().toString(36).substr(2, 9),
+        childId: babyObj.id,
+        ageGroupMonths: m.ageGroupMonths,
+        milestoneText: m.milestoneText,
+        pnpCategory: m.pnpCategory,
+        status: "not_yet",
+      });
+    });
+    localStorage.setItem("local_milestones", JSON.stringify(localMilestones));
+
+    // Recompute local alerts
+    recomputeLocalAlerts();
+
+    setShowAddChildModal(false);
+    await fetchSystemData();
+    setSelectedChildId(babyObj.id);
+
+    // Reset sheet
+    setNewChildForm({
+      name: "",
+      birthDate: "",
+      gender: "Masculino",
+      bloodType: "O+",
+      birthWeightKg: "",
+      birthHeightCm: "",
+      gestionalAgeWeeks: "39",
+      photoUrl: "",
+    });
   };
 
   // Submit Growth log check
   const handleCreateControl = async (e: React.FormEvent) => {
     e.preventDefault();
+    const tempLogId = "log_local_" + Math.random().toString(36).substr(2, 9);
+    const child = children.find(c => c.id === selectedChildId);
+    if (!child) return;
+
+    const z = calculateZScoresClient(child.birthDate, child.gender, parseFloat(newControlForm.weightKg), parseFloat(newControlForm.heightCm));
+
+    const localLog: GrowthLog = {
+      id: tempLogId,
+      childId: selectedChildId,
+      date: newControlForm.date,
+      weightKg: parseFloat(newControlForm.weightKg),
+      heightCm: parseFloat(newControlForm.heightCm),
+      headCircumferenceCm: newControlForm.headCircumferenceCm ? parseFloat(newControlForm.headCircumferenceCm) : undefined,
+      weightZ: z.weightZ,
+      heightZ: z.heightZ,
+      weightStatus: z.weightStatus,
+      heightStatus: z.heightStatus,
+      registeredBy: currentUser.name + " (Local)",
+    };
+
+    // Save locally
+    const localLogsStr = localStorage.getItem("local_growth_logs");
+    let localLogs = [];
+    if (localLogsStr) {
+      try { localLogs = JSON.parse(localLogsStr); } catch {}
+    }
+    localLogs.push(localLog);
+    localStorage.setItem("local_growth_logs", JSON.stringify(localLogs));
+
+    // Retrigger local alerts
+    recomputeLocalAlerts();
+
+    // Best-effort Server Post
     try {
-      const res = await fetch("/api/v1/growth/record", {
+      await fetch("/api/v1/growth/record", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -240,30 +581,21 @@ export default function App() {
           registeredBy: currentUser.name,
         }),
       });
-
-      if (res.ok) {
-        setShowAddControlModal(false);
-        // Refresh details, list alerts
-        await fetchChildDetail(selectedChildId);
-        // Sync general section
-        const aRes = await fetch("/api/v1/alerts");
-        const alertsData = await aRes.json();
-        setAlerts(alertsData);
-
-        // Reset
-        setNewControlForm({
-          date: new Date().toISOString().split("T")[0],
-          weightKg: "",
-          heightCm: "",
-          headCircumferenceCm: "",
-        });
-      } else {
-        const errorData = await res.json();
-        alert("Fallo el registro biométrico: " + errorData.error);
-      }
     } catch (err) {
-      alert("Error de red registrando control.");
+      console.warn("Fallo el registro biométrico en el servidor (se guardó localmente):", err);
     }
+
+    setShowAddControlModal(false);
+    await fetchChildDetail(selectedChildId);
+    await fetchSystemData();
+
+    // Reset
+    setNewControlForm({
+      date: new Date().toISOString().split("T")[0],
+      weightKg: "",
+      heightCm: "",
+      headCircumferenceCm: "",
+    });
   };
 
   // Open vaccine application modal
@@ -276,8 +608,34 @@ export default function App() {
   const handleUpdateVaccine = async (status: "applied" | "delayed") => {
     if (!vaccineToApply || !selectedChildId) return;
 
+    // Save locally first
+    const localVaccinesStr = localStorage.getItem("local_vaccine_records");
+    let localVaccines: VaccineRecord[] = [];
+    if (localVaccinesStr) {
+      try { localVaccines = JSON.parse(localVaccinesStr); } catch {}
+    }
+
+    const idx = localVaccines.findIndex(v => v.id === vaccineToApply.id && v.childId === selectedChildId);
+    const updatedRecord: VaccineRecord = {
+      ...vaccineToApply,
+      status,
+      dateApplied: status === "applied" ? vaccineDate : undefined,
+      nurseName: status === "applied" ? nurseSignature : undefined,
+    };
+
+    if (idx !== -1) {
+      localVaccines[idx] = updatedRecord;
+    } else {
+      localVaccines.push(updatedRecord);
+    }
+    localStorage.setItem("local_vaccine_records", JSON.stringify(localVaccines));
+
+    // Retrigger local alerts
+    recomputeLocalAlerts();
+
+    // Best-effort Server Post
     try {
-      const res = await fetch("/api/v1/vaccines/update", {
+      await fetch("/api/v1/vaccines/update", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -288,22 +646,14 @@ export default function App() {
           nurseName: status === "applied" ? nurseSignature : undefined,
         }),
       });
-
-      if (res.ok) {
-        setShowVaccinateModal(false);
-        setVaccineToApply(null);
-        await fetchChildDetail(selectedChildId);
-        // Sync alerts
-        const aRes = await fetch("/api/v1/alerts");
-        const alertsData = await aRes.json();
-        setAlerts(alertsData);
-      } else {
-        const data = await res.json();
-        alert(data.error);
-      }
     } catch (err) {
-      alert("Fallo de red al vacunar.");
+      console.warn("Fallo actualización de vacuna en el servidor (se guardó localmente):", err);
     }
+
+    setShowVaccinateModal(false);
+    setVaccineToApply(null);
+    await fetchChildDetail(selectedChildId);
+    await fetchSystemData();
   };
 
   // AI-powered growth projections clinical run
